@@ -169,16 +169,3 @@ jobs:
             ./dependency-check-report.html
             ./dependency-check-report.json
           retention-days: 30
-```
-
----
-
-## Why This Is The Right Fix
-
-Instead of trying to guess the username from the SA key (which is unreliable in GCP playground environments), **step 4 now SSHs into the VM and runs `whoami`** — the ground truth. It will always return `cloud_user_p_011c9c89` regardless of what the SA key contains.
-```
-VM SSH → whoami → "cloud_user_p_011c9c89"
-                         ↓
-              GCP_VM_USER set in $GITHUB_ENV
-                         ↓
-         /home/cloud_user_p_011c9c89/dc-data ✅
