@@ -26,24 +26,24 @@ jobs:
 
       # ──────────────────────────────────────────────
       # 2. Extract GCP_VM_USER from SA Key
-      #    Reads client_email from SA JSON
-      #    e.g. "my-sa@my-project.iam.gserviceaccount.com" → "my-sa"
+      #    Pattern: cloud_user_p_ + first 8 chars of client_id
+      #    e.g. client_id "011c9c8912345678" → cloud_user_p_011c9c89
       # ──────────────────────────────────────────────
       - name: Extract VM Username from SA Key
         id: extract_user
         run: |
           SA_JSON='${{ secrets.GCP_SA_KEY }}'
 
-          # Extract the prefix before @ in client_email
-          GCP_VM_USER=$(echo "$SA_JSON" | python3 -c "
+          CLIENT_ID=$(echo "$SA_JSON" | python3 -c "
           import sys, json
           data = json.load(sys.stdin)
-          email = data['client_email']
-          print(email.split('@')[0])
+          print(data['client_id'])
           ")
 
+          GCP_VM_USER="cloud_user_p_$(echo $CLIENT_ID | cut -c1-8)"
+
           echo "GCP_VM_USER=$GCP_VM_USER" >> $GITHUB_ENV
-          echo "Resolved VM user: $GCP_VM_USER"
+          echo "✅ Resolved VM user: $GCP_VM_USER"
 
       # ──────────────────────────────────────────────
       # 3. GCP Authentication
@@ -110,9 +110,7 @@ jobs:
 
       # ──────────────────────────────────────────────
       # 8. Run OWASP Dependency-Check via Docker
-      #    Uses pre-downloaded NVD DB — no live download
-      #    --noupdate flag ensures cached DB is used as-is
-      #    NVD_API_KEY still passed for any delta updates
+      #    --noupdate → uses pre-downloaded NVD DB, no network calls
       # ──────────────────────────────────────────────
       - name: Run OWASP Dependency-Check on GCP Server
         run: |
