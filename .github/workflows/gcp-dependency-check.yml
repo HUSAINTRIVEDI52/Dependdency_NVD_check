@@ -38,7 +38,8 @@ jobs:
         ZONE="${{ secrets.GCP_ZONE }}"
         
         # Compress locally, send via SCP, then extract to avoid pipe hanging
-        tar -czf repo.tar.gz .
+        # Exclude the tarball itself from the archive to prevent "file changed as we read it" error
+        tar --exclude=repo.tar.gz -czf repo.tar.gz .
         gcloud compute scp --quiet repo.tar.gz $INSTANCE_NAME:~/dependency-scan-dir/repo.tar.gz --zone=$ZONE
         gcloud compute ssh --quiet $INSTANCE_NAME --zone=$ZONE --command="cd ~/dependency-scan-dir && tar -xzf repo.tar.gz && rm repo.tar.gz"
 
