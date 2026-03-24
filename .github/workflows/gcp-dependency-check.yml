@@ -1,0 +1,73 @@
+name: GCP Dependency Check Scan
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  dependency-check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Create working directory on GCP Server
+      run: |
+        # Ensure Secrets are set: GCP_INSTANCE_NAME and GCP_ZONE
+        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
+        ZONE="${{ secrets.GCP_ZONE }}"
+        
+        # Create a directory on the server for the current run
+        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir"
+
+    - name: Copy Code to GCP Server
+      run: |
+        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
+        ZONE="${{ secrets.GCP_ZONE }}"
+        
+        # Using tar over SSH is faster and avoids scp issues with many files
+        tar -czf - . | gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="tar -xzf - -C ~/dependency-scan-dir"
+
+    - name: Run Dependency-Check on GCP Server
+      run: |
+        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
+        ZONE="${{ secrets.GCP_ZONE }}"
+        
+        # Run OWASP Dependency-Check using Docker
+        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir/odc-reports && docker run --rm -u \$(id -u):\$(id -g) -v ~/dependency-scan-dir:/src:z -v /home/cloud_user_p_011c9c89/dc-data:/usr/share/dependency-check/data:z -v ~/dependency-scan-dir/odc-reports:/report:z owasp/dependency-check --scan /src/backend --format HTML --project 'github-scan' --out /report"
+
+    - name: Copy Report Back to GitHub Runner
+      run: |
+        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
+        ZONE="${{ secrets.GCP_ZONE }}"
+        
+        # Download the report
+        gcloud compute scp $INSTANCE_NAME:~/dependency-scan-dir/odc-reports/dependency-check-report.html ./dependency-check-report.html --zone=$ZONE
+
+    - name: Clean up GCP Server
+      if: always()
+      run: |
+        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
+        ZONE="${{ secrets.GCP_ZONE }}"
+        
+        # Clean up the directory so it doesn't take up space over time
+        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="rm -rf ~/dependency-scan-dir"
+
+    - name: Upload Report Artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: Dependency-Check-Report
+        path: ./dependency-check-report.html
