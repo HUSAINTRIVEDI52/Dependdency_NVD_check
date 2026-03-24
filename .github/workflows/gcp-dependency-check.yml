@@ -8,9 +8,10 @@ on:
   workflow_dispatch:
 
 env:
-  INSTANCE_NAME: ${{ secrets.GCP_INSTANCE_NAME }}
+  # Force gcloud to connect as the user who already has the NVD database downloaded
+  INSTANCE_NAME: cloud_user_p_011c9c89@${{ secrets.GCP_INSTANCE_NAME }}
   ZONE: ${{ secrets.GCP_ZONE }}
-  SCAN_DIR: ~/dependency-scan-dir
+  SCAN_DIR: /home/cloud_user_p_011c9c89/dependency-scan-dir
 
 jobs:
   dependency-check:
