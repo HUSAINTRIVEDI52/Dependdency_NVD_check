@@ -30,15 +30,17 @@ jobs:
         ZONE="${{ secrets.GCP_ZONE }}"
         
         # Create a directory on the server for the current run
-        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir"
+        gcloud compute ssh --quiet $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir"
 
     - name: Copy Code to GCP Server
       run: |
         INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
         ZONE="${{ secrets.GCP_ZONE }}"
         
-        # Using tar over SSH is faster and avoids scp issues with many files
-        tar -czf - . | gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="tar -xzf - -C ~/dependency-scan-dir"
+        # Compress locally, send via SCP, then extract to avoid pipe hanging
+        tar -czf repo.tar.gz .
+        gcloud compute scp --quiet repo.tar.gz $INSTANCE_NAME:~/dependency-scan-dir/repo.tar.gz --zone=$ZONE
+        gcloud compute ssh --quiet $INSTANCE_NAME --zone=$ZONE --command="cd ~/dependency-scan-dir && tar -xzf repo.tar.gz && rm repo.tar.gz"
 
     - name: Run Dependency-Check on GCP Server
       run: |
@@ -46,7 +48,7 @@ jobs:
         ZONE="${{ secrets.GCP_ZONE }}"
         
         # Run OWASP Dependency-Check using Docker
-        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir/odc-reports && docker run --rm -u \$(id -u):\$(id -g) -v ~/dependency-scan-dir:/src:z -v /home/cloud_user_p_011c9c89/dc-data:/usr/share/dependency-check/data:z -v ~/dependency-scan-dir/odc-reports:/report:z owasp/dependency-check --scan /src/backend --format HTML --project 'github-scan' --out /report"
+        gcloud compute ssh --quiet $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir/odc-reports && docker run --rm -u \$(id -u):\$(id -g) -v ~/dependency-scan-dir:/src:z -v /home/cloud_user_p_011c9c89/dc-data:/usr/share/dependency-check/data:z -v ~/dependency-scan-dir/odc-reports:/report:z owasp/dependency-check --scan /src/backend --format HTML --project 'github-scan' --out /report"
 
     - name: Copy Report Back to GitHub Runner
       run: |
@@ -54,7 +56,7 @@ jobs:
         ZONE="${{ secrets.GCP_ZONE }}"
         
         # Download the report
-        gcloud compute scp $INSTANCE_NAME:~/dependency-scan-dir/odc-reports/dependency-check-report.html ./dependency-check-report.html --zone=$ZONE
+        gcloud compute scp --quiet $INSTANCE_NAME:~/dependency-scan-dir/odc-reports/dependency-check-report.html ./dependency-check-report.html --zone=$ZONE
 
     - name: Clean up GCP Server
       if: always()
@@ -63,7 +65,7 @@ jobs:
         ZONE="${{ secrets.GCP_ZONE }}"
         
         # Clean up the directory so it doesn't take up space over time
-        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="rm -rf ~/dependency-scan-dir"
+        gcloud compute ssh --quiet $INSTANCE_NAME --zone=$ZONE --command="rm -rf ~/dependency-scan-dir"
 
     - name: Upload Report Artifact
       if: always()
