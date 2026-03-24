@@ -2,74 +2,180 @@ name: GCP Dependency Check Scan
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
+
+env:
+  INSTANCE_NAME: ${{ secrets.GCP_INSTANCE_NAME }}
+  ZONE: ${{ secrets.GCP_ZONE }}
+  SCAN_DIR: ~/dependency-scan-dir
 
 jobs:
   dependency-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      # ──────────────────────────────────────────────
+      # 1. Checkout
+      # ──────────────────────────────────────────────
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
-      with:
-        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+      # ──────────────────────────────────────────────
+      # 2. Extract GCP_VM_USER from SA Key
+      #    Reads client_email from SA JSON
+      #    e.g. "my-sa@my-project.iam.gserviceaccount.com" → "my-sa"
+      # ──────────────────────────────────────────────
+      - name: Extract VM Username from SA Key
+        id: extract_user
+        run: |
+          SA_JSON='${{ secrets.GCP_SA_KEY }}'
 
-    - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v2
+          # Extract the prefix before @ in client_email
+          GCP_VM_USER=$(echo "$SA_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          email = data['client_email']
+          print(email.split('@')[0])
+          ")
 
-    - name: Create working directory on GCP Server
-      run: |
-        # Ensure Secrets are set: GCP_INSTANCE_NAME and GCP_ZONE
-        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
-        ZONE="${{ secrets.GCP_ZONE }}"
-        
-        # Create a directory on the server for the current run
-        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir"
+          echo "GCP_VM_USER=$GCP_VM_USER" >> $GITHUB_ENV
+          echo "Resolved VM user: $GCP_VM_USER"
 
-    - name: Copy Code to GCP Server
-      run: |
-        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
-        ZONE="${{ secrets.GCP_ZONE }}"
-        
-        # Use a temporary directory outside the project folder to prevent recursive archiving errors
-        tar -czf /tmp/repo.tar.gz .
-        gcloud compute scp /tmp/repo.tar.gz $INSTANCE_NAME:~/dependency-scan-dir/repo.tar.gz --zone=$ZONE
-        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="cd ~/dependency-scan-dir && tar -xzf repo.tar.gz && rm repo.tar.gz"
+      # ──────────────────────────────────────────────
+      # 3. GCP Authentication
+      # ──────────────────────────────────────────────
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
-    - name: Run Dependency-Check on GCP Server
-      run: |
-        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
-        ZONE="${{ secrets.GCP_ZONE }}"
-        
-        # Run OWASP Dependency-Check using Docker
-        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="mkdir -p ~/dependency-scan-dir/odc-reports && docker run --rm -u \$(id -u):\$(id -g) -v ~/dependency-scan-dir:/src:z -v /home/cloud_user_p_011c9c89/dc-data:/usr/share/dependency-check/data:z -v ~/dependency-scan-dir/odc-reports:/report:z owasp/dependency-check --scan /src/backend --format HTML --project 'github-scan' --out /report"
+      # ──────────────────────────────────────────────
+      # 4. Set up Cloud SDK
+      # ──────────────────────────────────────────────
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
 
-    - name: Copy Report Back to GitHub Runner
-      run: |
-        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
-        ZONE="${{ secrets.GCP_ZONE }}"
-        
-        # Download the report
-        gcloud compute scp $INSTANCE_NAME:~/dependency-scan-dir/odc-reports/dependency-check-report.html ./dependency-check-report.html --zone=$ZONE
+      # ──────────────────────────────────────────────
+      # 5. Verify NVD DB exists on GCP Server
+      #    Fails early and clearly if dc-data is missing
+      # ──────────────────────────────────────────────
+      - name: Verify NVD Database on GCP Server
+        run: |
+          DC_DATA_PATH="/home/$GCP_VM_USER/dc-data"
 
-    - name: Clean up GCP Server
-      if: always()
-      run: |
-        INSTANCE_NAME="${{ secrets.GCP_INSTANCE_NAME }}"
-        ZONE="${{ secrets.GCP_ZONE }}"
-        
-        # Clean up the directory so it doesn't take up space over time
-        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="rm -rf ~/dependency-scan-dir"
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$ZONE" \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="
+              if [ ! -d '$DC_DATA_PATH' ]; then
+                echo '❌ ERROR: NVD database directory not found at $DC_DATA_PATH'
+                echo 'Please pre-download the NVD DB on the VM first using:'
+                echo '  docker run --rm -v ~/dc-data:/usr/share/dependency-check/data owasp/dependency-check --updateonly --nvdApiKey <your-key>'
+                exit 1
+              fi
+              echo '✅ NVD database found at $DC_DATA_PATH'
+              ls -lh $DC_DATA_PATH
+            "
 
-    - name: Upload Report Artifact
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: Dependency-Check-Report
-        path: ./dependency-check-report.html
+      # ──────────────────────────────────────────────
+      # 6. Create Working Directory on GCP Server
+      # ──────────────────────────────────────────────
+      - name: Create Working Directory on GCP Server
+        run: |
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$ZONE" \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="mkdir -p $SCAN_DIR/odc-reports"
+
+      # ──────────────────────────────────────────────
+      # 7. Archive & Copy Code to GCP Server
+      # ──────────────────────────────────────────────
+      - name: Copy Repository to GCP Server
+        run: |
+          tar -czf /tmp/repo.tar.gz .
+
+          gcloud compute scp /tmp/repo.tar.gz \
+            "$INSTANCE_NAME:$SCAN_DIR/repo.tar.gz" \
+            --zone="$ZONE" \
+            --ssh-key-expire-after=1h
+
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$ZONE" \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="cd $SCAN_DIR && tar -xzf repo.tar.gz && rm repo.tar.gz"
+
+      # ──────────────────────────────────────────────
+      # 8. Run OWASP Dependency-Check via Docker
+      #    Uses pre-downloaded NVD DB — no live download
+      #    --noupdate flag ensures cached DB is used as-is
+      #    NVD_API_KEY still passed for any delta updates
+      # ──────────────────────────────────────────────
+      - name: Run OWASP Dependency-Check on GCP Server
+        run: |
+          DC_DATA_PATH="/home/$GCP_VM_USER/dc-data"
+
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$ZONE" \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="
+              docker run --rm \
+                -u \$(id -u):\$(id -g) \
+                -v $SCAN_DIR:/src:z \
+                -v $DC_DATA_PATH:/usr/share/dependency-check/data:z \
+                -v $SCAN_DIR/odc-reports:/report:z \
+                owasp/dependency-check \
+                  --scan /src/backend \
+                  --format HTML \
+                  --format JSON \
+                  --project 'github-scan' \
+                  --out /report \
+                  --nvdApiKey '${{ secrets.NVD_API_KEY }}' \
+                  --noupdate \
+                  --failOnCVSS 7 \
+                  --enableRetired \
+                  --enableExperimental
+            "
+
+      # ──────────────────────────────────────────────
+      # 9. Copy Reports Back to Runner
+      # ──────────────────────────────────────────────
+      - name: Copy Dependency-Check Reports to Runner
+        if: always()
+        run: |
+          gcloud compute scp \
+            "$INSTANCE_NAME:$SCAN_DIR/odc-reports/dependency-check-report.html" \
+            ./dependency-check-report.html \
+            --zone="$ZONE"
+
+          gcloud compute scp \
+            "$INSTANCE_NAME:$SCAN_DIR/odc-reports/dependency-check-report.json" \
+            ./dependency-check-report.json \
+            --zone="$ZONE"
+
+      # ──────────────────────────────────────────────
+      # 10. Cleanup GCP Server
+      # ──────────────────────────────────────────────
+      - name: Clean Up GCP Server
+        if: always()
+        run: |
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$ZONE" \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="rm -rf $SCAN_DIR"
+
+      # ──────────────────────────────────────────────
+      # 11. Upload Reports as Artifacts
+      # ──────────────────────────────────────────────
+      - name: Upload Dependency-Check Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dependency-Check-Report
+          path: |
+            ./dependency-check-report.html
+            ./dependency-check-report.json
+          retention-days: 30
